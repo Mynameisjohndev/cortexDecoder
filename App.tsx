@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   PermissionsAndroid,
@@ -5,9 +6,10 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  View
+  View,
 } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+
 import {
   Camera,
   useCameraDevice,
@@ -23,19 +25,17 @@ import {
   CDResult,
 } from 'cortex-decoder-react-native';
 
+type ScreenState = 'idle' | 'scanning' | 'result';
 type ScannerType = 'cortex' | 'vision';
 
 function ScannerScreen() {
-  const insets = useSafeAreaInsets();
-
+  const [state, setState] = useState<ScreenState>('idle');
   const [scannerType, setScannerType] = useState<ScannerType>('cortex');
-  const [lastResult, setLastResult] = useState('');
+  const [result, setResult] = useState('');
+
   const [androidPermission, setAndroidPermission] = useState(
     Platform.OS !== 'android'
   );
-
-  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
-  const licenseActivatedRef = useRef(false);
 
   /* ======================
      VISION CAMERA
@@ -47,8 +47,9 @@ function ScannerScreen() {
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
     onCodeScanned: codes => {
-      if (codes.length > 0) {
-        setLastResult(codes[0].value ?? '');
+      if (codes[0]?.value) {
+        setResult(codes[0].value);
+        setState('result');
       }
     },
   });
@@ -57,6 +58,9 @@ function ScannerScreen() {
      CORTEX
   ====================== */
 
+  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
+  const licenseActivatedRef = useRef(false);
+
   const ensureLicenseActivated = async () => {
     if (licenseActivatedRef.current) return;
 
@@ -64,9 +68,7 @@ function ScannerScreen() {
       process.env.EXPO_PUBLIC_CORTEX_CUSTOMER_ID ?? 'ReplaceExpirationLib';
     const licenseKey = process.env.EXPO_PUBLIC_CORTEX_LICENSE_KEY;
 
-    if (!licenseKey) {
-      throw new Error('Missing EXPO_PUBLIC_CORTEX_LICENSE_KEY');
-    }
+    if (!licenseKey) throw new Error('Missing Cortex license key');
 
     CDLicense.setCustomerId(customerId);
     await CDLicense.activateLicense(licenseKey);
@@ -81,7 +83,9 @@ function ScannerScreen() {
         'onDecodeResult',
         (results: CDResult[]) => {
           if (results?.[0]?.status === CDResult.CDDecodeStatus.success) {
-            setLastResult(results[0].barcodeData);
+            setResult(results[0].barcodeData);
+            stopAll();
+            setState('result');
           }
         }
       );
@@ -93,8 +97,13 @@ function ScannerScreen() {
     CDDecoder.setDecoding(true);
   };
 
-  const stopAllCameras = () => {
+  /* ======================
+     CONTROLE GERAL
+  ====================== */
+
+  const stopAll = () => {
     try {
+      // Cortex
       CDDecoder.setDecoding(false);
       CDCamera.setVideoCapturing(false);
       CDCamera.stopPreview();
@@ -122,35 +131,9 @@ function ScannerScreen() {
         await requestPermission();
       }
     })();
+
+    return stopAll;
   }, []);
-
-  /* ======================
-     CONTROLE DE TROCA
-  ====================== */
-
-  useEffect(() => {
-    let mounted = true;
-
-    const start = async () => {
-      stopAllCameras();
-      if (!mounted) return;
-
-      if (scannerType === 'cortex') {
-        await startCortex();
-      }
-    };
-
-    start();
-
-    return () => {
-      mounted = false;
-      stopAllCameras();
-    };
-  }, [scannerType]);
-
-  /* ======================
-     UI
-  ====================== */
 
   if (!androidPermission || !hasPermission) {
     return (
@@ -160,63 +143,99 @@ function ScannerScreen() {
     );
   }
 
+  /* ======================
+     UI
+  ====================== */
+
   return (
     <View style={styles.container}>
-      {/* CAMERA */}
-      {scannerType === 'cortex' ? (
-        <CDCameraView style={StyleSheet.absoluteFillObject} />
-      ) : (
-        device && (
-          <Camera
-            style={StyleSheet.absoluteFillObject}
-            device={device}
-            isActive={true}
-            codeScanner={codeScanner}
-          />
-        )
-      )}
+      {/* IDLE */}
+      {state === 'idle' && (
+        <View style={styles.center}>
+          <Ionicons name="qr-code-outline" size={96} color="#2563eb" />
+          <Text style={styles.title}>Leitor de QR Code</Text>
 
-      {/* OVERLAY */}
-      <View
-        style={[
-          styles.overlay,
-          { paddingBottom: insets.bottom + 16 },
-        ]}
-      >
-        <View style={styles.switchRow}>
-          <Pressable
-            style={[
-              styles.switchButton,
-              scannerType === 'cortex' && styles.active,
-            ]}
-            onPress={() => {
-              setLastResult('');
-              setScannerType('cortex');
-            }}
-          >
-            <Text style={styles.switchText}>CORTEX</Text>
-          </Pressable>
+          {/* Seletor */}
+          <View style={styles.switchRow}>
+            {(['cortex', 'vision'] as ScannerType[]).map(type => (
+              <Pressable
+                key={type}
+                style={[
+                  styles.switchButton,
+                  scannerType === type && styles.active,
+                ]}
+                onPress={() => setScannerType(type)}
+              >
+                <Text style={styles.switchText}>
+                  {type.toUpperCase()}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
 
           <Pressable
-            style={[
-              styles.switchButton,
-              scannerType === 'vision' && styles.active,
-            ]}
-            onPress={() => {
-              setLastResult('');
-              setScannerType('vision');
+            style={styles.primaryButton}
+            onPress={async () => {
+              setResult('');
+              setState('scanning');
+
+              if (scannerType === 'cortex') {
+                await startCortex();
+              }
             }}
           >
-            <Text style={styles.switchText}>VISION</Text>
+            <Ionicons name="camera" size={20} color="#fff" />
+            <Text style={styles.primaryText}>Ler QR Code</Text>
           </Pressable>
         </View>
+      )}
 
-        {!!lastResult && (
+      {/* SCANNING */}
+      {state === 'scanning' && (
+        <>
+          {scannerType === 'cortex' ? (
+            <CDCameraView style={StyleSheet.absoluteFillObject} />
+          ) : (
+            device && (
+              <Camera
+                style={StyleSheet.absoluteFillObject}
+                device={device}
+                isActive
+                codeScanner={codeScanner}
+              />
+            )
+          )}
+
+          <Pressable
+            style={styles.closeButton}
+            onPress={() => {
+              stopAll();
+              setState('idle');
+            }}
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </Pressable>
+        </>
+      )}
+
+      {/* RESULT */}
+      {state === 'result' && (
+        <View style={styles.center}>
+          <Ionicons name="checkmark-circle" size={96} color="#16a34a" />
+          <Text style={styles.title}>QR Code lido</Text>
+
           <View style={styles.resultBox}>
-            <Text style={styles.resultText}>{lastResult}</Text>
+            <Text style={styles.resultText}>{result}</Text>
           </View>
-        )}
-      </View>
+
+          <Pressable
+            style={styles.secondaryButton}
+            onPress={() => setState('idle')}
+          >
+            <Text style={styles.secondaryText}>Ler outro QR</Text>
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
@@ -234,28 +253,33 @@ export default function App() {
 ====================== */
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
+  container: { flex: 1, backgroundColor: '#0f172a' },
 
-  overlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 16,
-    gap: 12,
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    gap: 16,
+  },
+
+  title: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '700',
   },
 
   switchRow: {
     flexDirection: 'row',
     gap: 12,
+    marginTop: 8,
   },
 
   switchButton: {
-    flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderRadius: 10,
     backgroundColor: '#1f2937',
-    alignItems: 'center',
   },
 
   active: {
@@ -267,17 +291,55 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  resultBox: {
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 12,
-    borderRadius: 12,
+  primaryButton: {
+    marginTop: 16,
+    flexDirection: 'row',
+    gap: 8,
+    backgroundColor: '#2563eb',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 14,
+    alignItems: 'center',
   },
 
-  resultText: { color: '#fff' },
+  primaryText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
 
-  center: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+  secondaryButton: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+
+  secondaryText: {
+    color: '#cbd5f5',
+  },
+
+  resultBox: {
+    marginTop: 12,
+    backgroundColor: '#020617',
+    padding: 16,
+    borderRadius: 12,
+    width: '100%',
+  },
+
+  resultText: {
+    color: '#e5e7eb',
+    textAlign: 'center',
+  },
+
+  closeButton: {
+    position: 'absolute',
+    top: 48,
+    right: 24,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    padding: 6,
   },
 });
